@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.21";
+const APP_VERSION = "2026.10.01.22";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -298,16 +298,17 @@ function relevantExcerpt(content, searchText) {
     text.match(/- Quickbase\/data table:\s*([^\n]+)/i)?.[1],
     text.match(/## Requested change\s*\n([^\n]+)/i)?.[1]
   ].filter(Boolean).map(value=>value.trim().toLowerCase()).filter(value=>value&&value!=="not specified");
+  const corrected=selected.flatMap(value=>[value,value.replace(/\bpower code\b/g,"powder code").replace(/\bprodcut\b/g,"product").replace(/\bsafty\b/g,"safety")]);
   const stop=new Set(["remove","delete","from","this","that","with","change","update","please","report","screen","other","specified","quickbase","data","table","field","wording","type","feature","system"]);
-  const terms=[...selected,...selected.flatMap(value=>value.match(/[a-z0-9#_-]{3,}/g)||[])].filter(term=>!stop.has(term));
-  const unique=[...new Set(terms)].slice(0,12),lower=content.toLowerCase(),ranges=[];
-  for(const term of unique){let at=0,count=0;while((at=lower.indexOf(term,at))>=0&&count<5){ranges.push([Math.max(0,at-1000),Math.min(content.length,at+term.length+1700)]);at+=term.length;count++;}}
-  if(!ranges.length)return content.slice(0,26000);
-  ranges.sort((a,b)=>a[0]-b[0]);const merged=[];for(const range of ranges){const last=merged[merged.length-1];if(last&&range[0]<=last[1]+200)last[1]=Math.max(last[1],range[1]);else merged.push(range.slice());}
-  let excerpt="";for(const [rangeStart,rangeEnd] of merged){const chunk=content.slice(rangeStart,rangeEnd);if(excerpt.length+chunk.length>26000)break;excerpt+="\n/* relevant source section */\n"+chunk;}
-  return excerpt||content.slice(0,26000);
+  const terms=[...corrected,...corrected.flatMap(value=>value.match(/[a-z0-9#_-]{3,}/g)||[])].filter(term=>!stop.has(term));
+  const unique=[...new Set(terms)].slice(0,16),lower=content.toLowerCase(),ranges=[];
+  for(const term of unique){let at=0,count=0;while((at=lower.indexOf(term,at))>=0&&count<8){ranges.push([Math.max(0,at-900),Math.min(content.length,at+term.length+1500)]);at+=term.length;count++;}}
+  ranges.sort((a,b)=>a[0]-b[0]);const merged=[];for(const range of ranges){const last=merged[merged.length-1];if(last&&range[0]<=last[1]+160)last[1]=Math.max(last[1],range[1]);else merged.push(range.slice());}
+  let excerpt="";for(const [rangeStart,rangeEnd] of merged){const chunk=content.slice(rangeStart,rangeEnd);if(excerpt.length+chunk.length>15000)break;excerpt+="\n/* relevant source section */\n"+chunk;}
+  const tail=content.slice(-10500);
+  if(!excerpt.includes(tail))excerpt+="\n/* end of source file, including user interface */\n"+tail;
+  return excerpt.slice(0,26000);
 }
-
 async function repositoryContext(env, bot, searchText) {
   const repo=await githubApi(env,bot.repository,""); const branch=repo.default_branch; const ref=await githubApi(env,bot.repository,"/git/ref/heads/"+encodeURIComponent(branch)); const tree=await githubApi(env,bot.repository,"/git/trees/"+ref.object.sha+"?recursive=1");
   const rank=path=>{const p=path.toLowerCase();let score=0;if(p==="src/worker.js"||p==="worker.js"||p==="index.js")score+=100;if(p.startsWith("src/"))score+=30;if(/(worker|index|main|app)\.(js|ts|tsx|jsx|html)$/.test(p))score+=40;if(p.endsWith(".js")||p.endsWith(".ts"))score+=15;if(p.includes("test")||p.includes("node_modules")||p.includes("dist/"))score-=100;return score;};const candidates=(tree.tree||[]).filter(item=>item.type==="blob"&&item.size<=200000&&validSourcePath(item.path)).sort((a,b)=>rank(b.path)-rank(a.path)||a.size-b.size).slice(0,2);let used=0;const files=[];const loaded=await Promise.all(candidates.map(async item=>{const data=await githubApi(env,bot.repository,"/contents/"+item.path+"?ref="+encodeURIComponent(branch));return{path:item.path,sha:data.sha,content:decodeGithubContent(data.content)}}));for(const file of loaded){const excerpt=relevantExcerpt(file.content,searchText);if(used+excerpt.length>MAX_CONTEXT_CHARS)continue;files.push({...file,excerpt});used+=excerpt.length;}
@@ -316,14 +317,78 @@ async function repositoryContext(env, bot, searchText) {
 function aiText(result){return String(result?.response||result?.result?.response||result?.choices?.[0]?.message?.content||"");}
 function parseAiJson(text){const cleaned=String(text||"").trim().replace(/^```(?:json)?\s*/i,"").replace(/\s*```$/,"");const start=cleaned.indexOf("{"),end=cleaned.lastIndexOf("}");if(start<0||end<=start)throw publicError("The AI did not return a usable proposed change. Please add more detail and try again.",502);try{return JSON.parse(cleaned.slice(start,end+1));}catch{throw publicError("The AI proposal could not be read. Please try preparing it again.",502);}}
 
-async function createProposal(env,bot,issue,extraInstructions=""){
-  if(!env.AI)throw publicError("Cloudflare Workers AI is not connected.",503);const repo=await repositoryContext(env,bot,issue.body);if(!repo.files.length)throw publicError("No suitable source files were found in this repository.",422);
-  const sources=repo.files.map(file=>"\n--- FILE: "+file.path+" ---\n"+(file.excerpt||file.content)).join("");
-  const prompt=["You are preparing a small, safe code change for a Cloudflare Worker web application.","Return ONLY strict JSON with this shape: {\"summary\":\"short summary\",\"files\":[{\"path\":\"existing/path\",\"edits\":[{\"find\":\"exact existing text\",\"replace\":\"replacement text\"}]}]}","Rules: modify only existing files shown below; return no more than 3 files and 8 edits per file; every find value must be an exact, unique substring copied from the source; use an empty replace value to remove text; never modify .github/workflows; never delete or rename files; make the smallest change that satisfies the request; preserve existing behaviour and secrets; do not invent credentials.","Requested change:\n"+String(issue.body||"").split("## Request details")[0],extraInstructions?"Revision instructions:\n"+extraInstructions:"","Repository files:"+sources].filter(Boolean).join("\n\n");
-  const result=await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8",{messages:[{role:"system",content:"You are a careful senior software engineer. Output strict JSON only."},{role:"user",content:prompt}],max_tokens:1800,temperature:0.1});let proposal=null;try{proposal=parseAiJson(aiText(result));}catch(error){console.error("First AI proposal was not valid JSON",error.message);}if(!proposal||!Array.isArray(proposal.files)||!proposal.files.length||proposal.files.length>MAX_AI_FILES){const correction="Your previous response was invalid because it did not include between 1 and 3 changed existing files. You must implement the request now using small exact find/replace edits. Return only strict JSON. Do not explain or return an empty files array.";const retry=await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8",{messages:[{role:"system",content:"You are a careful senior software engineer. Output strict JSON only and always provide 1 to 3 changed existing files using exact find/replace edits."},{role:"user",content:prompt},{role:"assistant",content:aiText(result).slice(0,12000)},{role:"user",content:correction}],max_tokens:1800,temperature:0});proposal=parseAiJson(aiText(retry));}if(!Array.isArray(proposal.files)||!proposal.files.length||proposal.files.length>MAX_AI_FILES)throw publicError("The AI could not identify a safe code change. Add the screen, field or wording that should change and try again.",422);const known=new Map(repo.files.map(file=>[file.path,file]));
-  const grouped=[];for(const item of proposal.files){const path=String(item.path||"");const existing=grouped.find(entry=>String(entry.path||"")===path);if(existing){existing.edits=[...(existing.edits||[]),...(item.edits||[])];if(typeof item.content==="string")existing.content=item.content;}else grouped.push({...item,path});}const files=grouped.map(item=>{const path=String(item.path||"");const original=known.get(path);if(!original||!validSourcePath(path))throw publicError("The AI attempted to change a file that is not permitted.",422);let content=typeof item.content==="string"?item.content:original.content;if(Array.isArray(item.edits)){if(!item.edits.length||item.edits.length>8)throw publicError("The AI returned an invalid number of edits.",422);for(const edit of item.edits){const find=String(edit.find??""),replace=String(edit.replace??"");if(!find)throw publicError("The AI returned an empty search value.",422);const first=content.indexOf(find);if(first<0||content.indexOf(find,first+find.length)>=0)throw publicError("The AI proposed an edit that could not be matched safely. Try preparing the change again.",422);content=content.slice(0,first)+replace+content.slice(first+find.length);}}if(!content||content===original.content||content.length>250000)throw publicError("The AI returned an invalid or unchanged file.",422);return{path,content,sha:original.sha};});return{repo,summary:String(proposal.summary||"Proposed chatbot change").slice(0,180),files};
+function requestForAi(issueBody){
+  return String(issueBody||"")
+    .replace(/<!-- bot-manager-request-id:[^>]+ -->/g,"")
+    .replace(/<!-- bot-manager-workflow:[^>]+ -->/g,"")
+    .replace(/> This request has not been deployed[^\n]*/g,"")
+    .trim();
 }
 
+function applyAiProposal(proposal,repo){
+  if(!proposal||!Array.isArray(proposal.files)||!proposal.files.length||proposal.files.length>MAX_AI_FILES)return{error:"The response did not contain between one and three changed files."};
+  const known=new Map(repo.files.map(file=>[file.path,file])),grouped=[];
+  for(const item of proposal.files){
+    const path=String(item.path||""),existing=grouped.find(entry=>String(entry.path||"")===path);
+    if(existing){existing.edits=[...(existing.edits||[]),...(item.edits||[])];if(typeof item.content==="string")existing.content=item.content;}
+    else grouped.push({...item,path});
+  }
+  const files=[];
+  for(const item of grouped){
+    const path=String(item.path||""),original=known.get(path);
+    if(!original||!validSourcePath(path))return{error:"The response selected a file that is not available or permitted: "+path};
+    let changed=typeof item.content==="string"?item.content:original.content;
+    if(Array.isArray(item.edits)){
+      if(!item.edits.length||item.edits.length>8)return{error:"The response contained an invalid number of edits for "+path+"."};
+      for(const edit of item.edits){
+        const find=String(edit.find??""),replace=String(edit.replace??"");
+        if(!find)return{error:"An edit used an empty search value."};
+        const first=changed.indexOf(find),second=first<0?-1:changed.indexOf(find,first+find.length);
+        if(first<0)return{error:"The exact text proposed for replacement was not found in "+path+": "+JSON.stringify(find.slice(0,240))};
+        if(second>=0)return{error:"The proposed search text occurs more than once in "+path+" and is not safe to replace: "+JSON.stringify(find.slice(0,240))};
+        changed=changed.slice(0,first)+replace+changed.slice(first+find.length);
+      }
+    }
+    if(!changed||changed===original.content||changed.length>250000)return{error:"The proposed content for "+path+" was empty, unchanged, or too large."};
+    files.push({path,content:changed,sha:original.sha});
+  }
+  return{files};
+}
+
+async function createProposal(env,bot,issue,extraInstructions=""){
+  if(!env.AI)throw publicError("Cloudflare Workers AI is not connected.",503);
+  const repo=await repositoryContext(env,bot,issue.body);
+  if(!repo.files.length)throw publicError("No suitable source files were found in this repository.",422);
+  const sources=repo.files.map(file=>"\n--- FILE: "+file.path+" ---\n"+(file.excerpt||file.content)).join("");
+  const requestDetails=requestForAi(issue.body);
+  const prompt=[
+    "You are preparing a small, safe code change for a Cloudflare Worker web application.",
+    "Read the complete request details, including the selected screen, table and exact field or wording. Infer the user's intended change even when the request contains spelling mistakes or informal wording.",
+    "Find the closest matching existing interface label or behaviour in the supplied source. The find value must always be copied exactly from the source, never copied blindly from the user's wording.",
+    "Return ONLY strict JSON with this shape: {\"summary\":\"short summary\",\"files\":[{\"path\":\"existing/path\",\"edits\":[{\"find\":\"exact existing text\",\"replace\":\"replacement text\"}]}]}",
+    "Rules: modify only existing files shown below; return no more than 3 files and 8 edits per file; every find value must be an exact, unique substring copied from the source; use an empty replace value to remove text; never modify .github/workflows; never delete or rename files; make the smallest change that satisfies the request; preserve existing behaviour and secrets; do not invent credentials.",
+    "Complete request details:\n"+requestDetails,
+    extraInstructions?"Revision instructions:\n"+extraInstructions:"",
+    "Repository files:"+sources
+  ].filter(Boolean).join("\n\n");
+  let previous="",validationError="";
+  for(let attempt=0;attempt<2;attempt++){
+    const messages=[{role:"system",content:"You are a careful senior software engineer. Understand the user's intent, tolerate spelling mistakes, inspect the source, and output strict JSON only."},{role:"user",content:prompt}];
+    if(attempt){
+      messages.push({role:"assistant",content:previous.slice(0,10000)});
+      messages.push({role:"user",content:"Your previous proposal could not be applied safely. Reason: "+validationError+"\nInspect the supplied source again. Correct the file path and copy a longer exact, unique find value directly from the source. Return only corrected strict JSON with at least one real edit."});
+    }
+    const result=await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8",{messages,max_tokens:2200,temperature:attempt?0:0.1});
+    previous=aiText(result);
+    let proposal;
+    try{proposal=parseAiJson(previous);}catch(error){validationError=error.publicMessage||error.message;console.error("AI proposal parse attempt "+(attempt+1)+" failed",validationError);continue;}
+    const applied=applyAiProposal(proposal,repo);
+    if(applied.files)return{repo,summary:String(proposal.summary||"Proposed chatbot change").slice(0,180),files:applied.files};
+    validationError=applied.error;
+    console.error("AI proposal validation attempt "+(attempt+1)+" failed",validationError);
+  }
+  throw publicError("The request was understood, but the manager could not match a safe exact change in the current code. Check the selected feature and wording, then try again.",422);
+}
 async function prepareChange(request,env){sameOrigin(request);const input=await request.json();const owned=await getOwnedIssue(request,env,input);if(owned.meta.pr&&owned.meta.stage==="review")throw publicError("This request already has a proposed change ready for review.",409);const proposal=await createProposal(env,owned.bot,owned.issue,String(input.revision||""));const branch="bot-manager/issue-"+owned.number+"-"+Date.now();await githubApi(env,owned.bot.repository,"/git/refs",{method:"POST",body:JSON.stringify({ref:"refs/heads/"+branch,sha:proposal.repo.headSha})});for(const file of proposal.files){const current=await githubApi(env,owned.bot.repository,"/contents/"+file.path+"?ref="+encodeURIComponent(branch));await githubApi(env,owned.bot.repository,"/contents/"+file.path,{method:"PUT",body:JSON.stringify({message:"Prepare change for request #"+owned.number,content:encodeGithubContent(file.content),sha:current.sha,branch})});}const pr=await githubApi(env,owned.bot.repository,"/pulls",{method:"POST",body:JSON.stringify({title:"AI proposal for request #"+owned.number,head:branch,base:proposal.repo.branch,body:"Prepared through AI Bot Manager for issue #"+owned.number+".\n\nThis pull request must be approved by "+owned.session.name+" before deployment."})});await githubApi(env,owned.bot.repository,"/issues/"+owned.number,{method:"PATCH",body:JSON.stringify({body:replaceWorkflowMeta(owned.issue.body,{pr:pr.number,branch,stage:"review"})})});return json({ok:true,prNumber:pr.number,summary:proposal.summary});}
 
 async function reviseChange(request,env){sameOrigin(request);const input=await request.json();const owned=await getOwnedIssue(request,env,input);const revision=String(input.revision||"").trim();if(revision.length<5||revision.length>3000)throw publicError("Please describe the revision required.",400);const prNumber=owned.meta.stage==="rollback-review"?owned.meta.rollbackPr:owned.meta.pr;if(!prNumber||!["review","rollback-review"].includes(owned.meta.stage))throw publicError("There is no proposed change to revise.",409);await githubApi(env,owned.bot.repository,"/pulls/"+prNumber,{method:"PATCH",body:JSON.stringify({state:"closed"})});const body=String(owned.issue.body||"").replace(/\n?<!-- bot-manager-workflow:[^>]+ -->/g,"").trimEnd()+"\n\n## Revision requested\n"+revision;await githubApi(env,owned.bot.repository,"/issues/"+owned.number,{method:"PATCH",body:JSON.stringify({body:replaceWorkflowMeta(body,{stage:owned.meta.stage==="rollback-review"?"deployed":"revision",pr:owned.meta.pr,branch:owned.meta.branch,merged:owned.meta.mergedSha}),state:owned.meta.stage==="rollback-review"?"closed":"open"})});return json({ok:true});}
