@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.22";
+const APP_VERSION = "2026.10.01.23";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -217,7 +217,7 @@ async function createChangeRequest(request, env) {
 
 const SAFE_TEXT_EXTENSIONS = new Set(["js","mjs","cjs","ts","tsx","jsx","json","toml","html","css","md"]);
 const MAX_AI_FILES = 3;
-const MAX_CONTEXT_CHARS = 30000;
+const MAX_CONTEXT_CHARS = 22000;
 
 async function githubApi(env, repository, path, options = {}) {
   if (!env.GITHUB_TOKEN) throw publicError("GitHub is not connected.", 503);
@@ -355,10 +355,33 @@ function applyAiProposal(proposal,repo){
   return{files};
 }
 
+function simpleWordingProposal(issueBody,repo){
+  const body=String(issueBody||"");
+  if(!/- Change type:\s*Wording or label/i.test(body))return null;
+  const current=body.match(/- Exact field or wording:\s*([^\n]+)/i)?.[1]?.trim();
+  if(!current||/^not specified$/i.test(current))return null;
+  const request=body.match(/## Requested change\s*\n([\s\S]*?)(?:\n\n## Request details|$)/i)?.[1]?.trim()||"";
+  const replacement=
+    request.match(/new (?:word|wording|text|label)\s*(?:is|should be|:)?\s*["“']([^"”']+)["”']/i)?.[1]?.trim()||
+    request.match(/(?:change|replace)\s+["“']?[^\n"”']+["”']?\s+(?:to|with)\s+["“']([^"”']+)["”']/i)?.[1]?.trim();
+  if(!replacement||replacement===current)return null;
+  const matches=[];
+  for(const file of repo.files){
+    let position=0;
+    while((position=file.content.indexOf(current,position))>=0){matches.push({file,position});position+=current.length;}
+  }
+  if(matches.length!==1)return null;
+  const match=matches[0];
+  const changed=match.file.content.slice(0,match.position)+replacement+match.file.content.slice(match.position+current.length);
+  return{repo,summary:"Change "+current+" to "+replacement,files:[{path:match.file.path,content:changed,sha:match.file.sha}]};
+}
+
 async function createProposal(env,bot,issue,extraInstructions=""){
   if(!env.AI)throw publicError("Cloudflare Workers AI is not connected.",503);
   const repo=await repositoryContext(env,bot,issue.body);
   if(!repo.files.length)throw publicError("No suitable source files were found in this repository.",422);
+  const direct=simpleWordingProposal(issue.body,repo);
+  if(direct)return direct;
   const sources=repo.files.map(file=>"\n--- FILE: "+file.path+" ---\n"+(file.excerpt||file.content)).join("");
   const requestDetails=requestForAi(issue.body);
   const prompt=[
@@ -378,7 +401,9 @@ async function createProposal(env,bot,issue,extraInstructions=""){
       messages.push({role:"assistant",content:previous.slice(0,10000)});
       messages.push({role:"user",content:"Your previous proposal could not be applied safely. Reason: "+validationError+"\nInspect the supplied source again. Correct the file path and copy a longer exact, unique find value directly from the source. Return only corrected strict JSON with at least one real edit."});
     }
-    const result=await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8",{messages,max_tokens:2200,temperature:attempt?0:0.1});
+    let result;
+    try{result=await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8",{messages,max_tokens:1400,temperature:attempt?0:0.1});}
+    catch(error){console.error("Workers AI attempt "+(attempt+1)+" failed",error);validationError="The AI service could not process the request.";continue;}
     previous=aiText(result);
     let proposal;
     try{proposal=parseAiJson(previous);}catch(error){validationError=error.publicMessage||error.message;console.error("AI proposal parse attempt "+(attempt+1)+" failed",validationError);continue;}
@@ -510,7 +535,7 @@ const HTML = `<!doctype html>
 <section id="myRequests" class="card"><div class="requestHeader"><div><h2>My Requests</h2><p class="help">Prepare changes, review every changed file, deploy, or restore the previous version.</p></div><button id="refreshRequests" class="button secondary" type="button">Refresh</button></div><div id="requestsStatus" class="status"></div><div id="requestList" class="requestList"></div></section>
 </section></main><script>
 let selectedBot=null;const $=id=>document.getElementById(id);
-async function api(path,options={}){const response=await fetch(path,{cache:'no-store',credentials:'same-origin',...options});const body=await response.text();let data;try{data=JSON.parse(body)}catch{const e=new Error('The server returned an unexpected response (HTTP '+response.status+'). Check the Cloudflare logs.');e.status=response.status;throw e}if(!response.ok){const e=new Error(data.error||'Unable to complete the request.');e.status=response.status;throw e}return data}
+async function api(path,options={}){const response=await fetch(path,{cache:'no-store',credentials:'same-origin',...options});const body=await response.text();let data;try{data=JSON.parse(body)}catch{const e=new Error(response.status===500?'The server could not prepare this request. Please try once more. If it continues, the request may need more exact wording.':'The server returned an unexpected response (HTTP '+response.status+').');e.status=response.status;throw e}if(!response.ok){const e=new Error(data.error||'Unable to complete the request.');e.status=response.status;throw e}return data}
 function status(el,message,error=false){el.textContent=message;el.className='status '+(error?'error':'')}
 async function initialise(){try{const session=await api('/api/session');if(session.authenticated)await showApp(session);else showLogin()}catch{showLogin()}}
 function showLogin(){$('loginCard').classList.remove('hidden');$('app').classList.add('hidden')}
