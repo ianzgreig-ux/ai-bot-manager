@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.13";
+const APP_VERSION = "2026.10.01.14";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -257,7 +257,7 @@ async function listChangeRequests(session, env) {
     const issues = await githubApi(env, bot.repository, "/issues?state=all&per_page=50&sort=updated&direction=desc");
     for (const issue of issues) {
       if (issue.pull_request || !ownsIssue(issue, session) || !String(issue.body || "").includes("Submitted through: AI Bot Manager")) continue;
-      const meta = parseRequestMeta(issue.body); let pr = null; const prNumber = meta.rollbackPr || meta.pr;
+      const meta = parseRequestMeta(issue.body); if (meta.stage === "cancelled") continue; let pr = null; const prNumber = meta.rollbackPr || meta.pr;
       if (prNumber) try { const item = await githubApi(env, bot.repository, "/pulls/" + prNumber); const files = await githubApi(env, bot.repository, "/pulls/" + prNumber + "/files?per_page=20"); pr = { number:item.number, state:item.state, merged:item.merged, htmlUrl:item.html_url, files:files.map(file => ({ path:file.filename, additions:file.additions, deletions:file.deletions, patch:file.patch || "Diff is too large to display." })) }; } catch (error) { console.error("Unable to load PR", prNumber, error); }
       output.push({ botId:bot.id, botName:bot.name, issueNumber:issue.number, title:issue.title, request:String(issue.body || "").split("## Request details")[0].replace("## Requested change","").trim(), createdAt:issue.created_at, updatedAt:issue.updated_at, issueState:issue.state, screenshotCount:meta.keys.length, stage:meta.stage, pr, mergedSha:meta.mergedSha });
     }
