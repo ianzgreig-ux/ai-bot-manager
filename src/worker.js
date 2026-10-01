@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.27";
+const APP_VERSION = "2026.10.01.28";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -50,8 +50,8 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/health") {
         return json({ ok: true, service: "AI Bot Manager", version: APP_VERSION });
       }
-      if (request.method === "POST" && url.pathname === "/api/login") return login(request, env);
-      if (request.method === "POST" && url.pathname === "/api/logout") return logout(request);
+      if (request.method === "POST" && url.pathname === "/api/login") return await login(request, env);
+      if (request.method === "POST" && url.pathname === "/api/logout") return await logout(request);
       if (request.method === "GET" && url.pathname === "/api/session") {
         const session = await readSession(request, env);
         return json(session ? publicSession(session) : { authenticated: false });
@@ -61,16 +61,16 @@ export default {
         return json({ role: publicSession(session), bots: allowedBots(session.role) });
       }
       if (request.method === "POST" && url.pathname === "/api/change-requests") {
-        return createChangeRequest(request, env);
+        return await createChangeRequest(request, env);
       }
-      if (request.method === "GET" && url.pathname === "/api/change-list") { const session = await requireSession(request, env); return listChangeRequests(session, env); }
-      if (request.method === "POST" && url.pathname === "/api/requests/prepare") return prepareChange(request, env);
-      if (request.method === "POST" && url.pathname === "/api/requests/revise") return reviseChange(request, env);
-      if (request.method === "POST" && url.pathname === "/api/requests/deploy") return deployChange(request, env);
-      if (request.method === "POST" && url.pathname === "/api/requests/rollback") return prepareRollback(request, env);
-      if (request.method === "POST" && url.pathname === "/api/requests/delete") return deleteChange(request, env);
+      if (request.method === "GET" && url.pathname === "/api/change-list") { const session = await requireSession(request, env); return await listChangeRequests(session, env); }
+      if (request.method === "POST" && url.pathname === "/api/requests/prepare") return await prepareChange(request, env);
+      if (request.method === "POST" && url.pathname === "/api/requests/revise") return await reviseChange(request, env);
+      if (request.method === "POST" && url.pathname === "/api/requests/deploy") return await deployChange(request, env);
+      if (request.method === "POST" && url.pathname === "/api/requests/rollback") return await prepareRollback(request, env);
+      if (request.method === "POST" && url.pathname === "/api/requests/delete") return await deleteChange(request, env);
       const shotMatch = url.pathname.match(/^\/api\/requests\/([^/]+)\/(\d+)\/screenshots\/(\d+)$/);
-      if (request.method === "GET" && shotMatch) return getRequestScreenshot(request, env, shotMatch[1], Number(shotMatch[2]), Number(shotMatch[3]));
+      if (request.method === "GET" && shotMatch) return await getRequestScreenshot(request, env, shotMatch[1], Number(shotMatch[2]), Number(shotMatch[3]));
       return json({ error: "Not found." }, 404);
     } catch (error) {
       console.error(error);
@@ -218,6 +218,7 @@ async function createChangeRequest(request, env) {
 const SAFE_TEXT_EXTENSIONS = new Set(["js","mjs","cjs","ts","tsx","jsx","json","toml","html","css","md"]);
 const MAX_AI_FILES = 3;
 const MAX_CONTEXT_CHARS = 22000;
+const MAX_SOURCE_BYTES = 900000;
 
 async function githubApi(env, repository, path, options = {}) {
   if (!env.GITHUB_TOKEN) throw publicError("GitHub is not connected.", 503);
@@ -289,30 +290,94 @@ function validSourcePath(path) { const clean=String(path||""); const ext=clean.i
 function decodeGithubContent(value) { const binary=atob(String(value||"").replace(/\n/g,"")); return new TextDecoder().decode(Uint8Array.from(binary,c=>c.charCodeAt(0))); }
 function encodeGithubContent(value) { const bytes=new TextEncoder().encode(value); let binary=""; for(let i=0;i<bytes.length;i+=32768) binary+=String.fromCharCode(...bytes.subarray(i,i+32768)); return btoa(binary); }
 
-function relevantExcerpt(content, searchText) {
-  if(content.length<=26000)return content;
-  const text=String(searchText||"");
-  const selected=[
-    text.match(/- Exact field or wording:\s*([^\n]+)/i)?.[1],
-    text.match(/- Screen or feature:\s*([^\n]+)/i)?.[1],
-    text.match(/- Quickbase\/data table:\s*([^\n]+)/i)?.[1],
-    text.match(/## Requested change\s*\n([^\n]+)/i)?.[1]
-  ].filter(Boolean).map(value=>value.trim().toLowerCase()).filter(value=>value&&value!=="not specified");
-  const corrected=selected.flatMap(value=>[value,value.replace(/\bpower code\b/g,"powder code").replace(/\bprodcut\b/g,"product").replace(/\bsafty\b/g,"safety")]);
-  const stop=new Set(["remove","delete","from","this","that","with","change","update","please","report","screen","other","specified","quickbase","data","table","field","wording","type","feature","system"]);
-  const terms=[...corrected,...corrected.flatMap(value=>value.match(/[a-z0-9#_-]{3,}/g)||[])].filter(term=>!stop.has(term));
-  const unique=[...new Set(terms)].slice(0,16),lower=content.toLowerCase(),ranges=[];
-  for(const term of unique){let at=0,count=0;while((at=lower.indexOf(term,at))>=0&&count<8){ranges.push([Math.max(0,at-900),Math.min(content.length,at+term.length+1500)]);at+=term.length;count++;}}
-  ranges.sort((a,b)=>a[0]-b[0]);const merged=[];for(const range of ranges){const last=merged[merged.length-1];if(last&&range[0]<=last[1]+160)last[1]=Math.max(last[1],range[1]);else merged.push(range.slice());}
-  let excerpt="";for(const [rangeStart,rangeEnd] of merged){const chunk=content.slice(rangeStart,rangeEnd);if(excerpt.length+chunk.length>15000)break;excerpt+="\n/* relevant source section */\n"+chunk;}
-  const tail=content.slice(-10500);
-  if(!excerpt.includes(tail))excerpt+="\n/* end of source file, including user interface */\n"+tail;
-  return excerpt.slice(0,26000);
+function requestedChange(body) {
+  return String(body||"").match(/## Requested change\s*\n([\s\S]*?)(?:\n\n## Request details|$)/i)?.[1]?.trim()||"";
 }
-async function repositoryContext(env, bot, searchText) {
-  const repo=await githubApi(env,bot.repository,""); const branch=repo.default_branch; const ref=await githubApi(env,bot.repository,"/git/ref/heads/"+encodeURIComponent(branch)); const tree=await githubApi(env,bot.repository,"/git/trees/"+ref.object.sha+"?recursive=1");
-  const rank=path=>{const p=path.toLowerCase();let score=0;if(p==="src/worker.js"||p==="worker.js"||p==="index.js")score+=100;if(p.startsWith("src/"))score+=30;if(/(worker|index|main|app)\.(js|ts|tsx|jsx|html)$/.test(p))score+=40;if(p.endsWith(".js")||p.endsWith(".ts"))score+=15;if(p.includes("test")||p.includes("node_modules")||p.includes("dist/"))score-=100;return score;};const candidates=(tree.tree||[]).filter(item=>item.type==="blob"&&item.size<=200000&&validSourcePath(item.path)).sort((a,b)=>rank(b.path)-rank(a.path)||a.size-b.size).slice(0,2);let used=0;const files=[];const loaded=await Promise.all(candidates.map(async item=>{const data=await githubApi(env,bot.repository,"/contents/"+item.path+"?ref="+encodeURIComponent(branch));return{path:item.path,sha:data.sha,content:decodeGithubContent(data.content)}}));for(const file of loaded){const excerpt=relevantExcerpt(file.content,searchText);if(used+excerpt.length>MAX_CONTEXT_CHARS)continue;files.push({...file,excerpt});used+=excerpt.length;}
-  return {branch,headSha:ref.object.sha,files};
+
+function sourceTerms(body) {
+  const text=String(body||""),request=requestedChange(text);
+  const selected=[
+    ...Array.from(request.matchAll(/["“']([^"”'\n]+)["”']/g),match=>match[1]),
+    text.match(/- Exact field or wording:[ \t]*([^\n]+)/i)?.[1],
+    text.match(/- Screen or feature:[ \t]*([^\n]+)/i)?.[1],
+    text.match(/- Quickbase\/data table:[ \t]*([^\n]+)/i)?.[1],
+    request,
+    ...text.split(/## Revision requested\s*\n/i).slice(1)
+  ].filter(Boolean).map(value=>value.trim().toLowerCase()).filter(value=>value&&!/^(not specified|other)$/.test(value));
+  const corrected=selected.flatMap(value=>[value,value.replace(/\bpower code\b/g,"powder code").replace(/\bprodcut\b/g,"product").replace(/\bsafty\b/g,"safety")]);
+  const stop=new Set(["remove","delete","from","this","that","with","change","update","please","report","screen","other","specified","quickbase","data","table","field","wording","type","feature","system","word","label","new","the","and"]);
+  return [...new Set([...corrected,...corrected.flatMap(value=>value.match(/[a-z0-9#_-]{3,}/g)||[])])].filter(term=>term.length>=3&&!stop.has(term)).slice(0,32);
+}
+
+function permittedProposalPath(path,body) {
+  if(!validSourcePath(path)||/(^|\/)(node_modules|dist|build|vendor|coverage|tests?|__tests__)(\/|$)|\.(test|spec)\./i.test(path))return false;
+  const request=requestedChange(body);
+  if(/\.md$/i.test(path))return /\b(readme|documentation|markdown)\b/i.test(request);
+  if(/\.(json|toml)$/i.test(path))return /\b(config(?:uration)?|wrangler|package\.json|dependenc(?:y|ies)|build|deploy(?:ment)?|translation|locali[sz]ation)\b/i.test(request);
+  return true;
+}
+
+function relevantExcerpt(content,searchText,budget=MAX_CONTEXT_CHARS) {
+  if(content.length<=budget)return content;
+  const lower=content.toLowerCase(),ranges=[];
+  let excerpt="";
+  const add=(start,end)=>{
+    if(ranges.some(([a,b])=>start>=a&&end<=b))return;
+    const marker="\n/* source excerpt */\n",available=budget-excerpt.length-marker.length;
+    if(available<200)return;
+    end=Math.min(end,start+available);
+    excerpt+=marker+content.slice(start,end);ranges.push([start,end]);
+  };
+  // Exact wording is considered before broad keywords. Never discard a file
+  // because its excerpt exceeds the total prompt budget.
+  for(const term of sourceTerms(searchText)){
+    let at=0,count=0;
+    while((at=lower.indexOf(term,at))>=0&&count++<3){
+      add(Math.max(0,at-500),Math.min(content.length,at+term.length+1000));at+=term.length;
+    }
+  }
+  if(budget-excerpt.length>200)add(Math.max(0,content.length-Math.min(6000,budget-excerpt.length-24)),content.length);
+  return excerpt;
+}
+
+async function repositoryContext(env,bot,searchText) {
+  const repo=await githubApi(env,bot.repository,"");
+  const branch=repo.default_branch;
+  const ref=await githubApi(env,bot.repository,"/git/ref/heads/"+encodeURIComponent(branch));
+  const headSha=ref.object.sha;
+  const tree=await githubApi(env,bot.repository,"/git/trees/"+headSha+"?recursive=1");
+  if(tree.truncated)throw publicError("The repository is too large to inspect completely. Please narrow the source repository.",422);
+  const terms=sourceTerms(searchText);
+  const rank=path=>{
+    const p=path.toLowerCase();let score=0;
+    if(/(^|\/)(worker|index|main|app)\.(m?[jt]sx?|html)$/.test(p))score+=100;
+    if(p.startsWith("src/"))score+=30;
+    for(const term of terms)if(p.includes(term))score+=20;
+    return score;
+  };
+  const candidates=(tree.tree||[]).filter(item=>item.type==="blob"&&item.size<=MAX_SOURCE_BYTES&&permittedProposalPath(item.path,searchText))
+    .sort((a,b)=>rank(b.path)-rank(a.path)||a.path.localeCompare(b.path)).slice(0,12);
+  const loaded=[];
+  for(let i=0;i<candidates.length;i+=3){
+    loaded.push(...await Promise.all(candidates.slice(i,i+3).map(async item=>{
+      const data=await githubApi(env,bot.repository,"/contents/"+item.path+"?ref="+encodeURIComponent(headSha));
+      if(data.encoding!=="base64"||typeof data.content!=="string")throw publicError("The source file could not be read: "+item.path,422);
+      return {path:item.path,sha:data.sha,content:decodeGithubContent(data.content)};
+    })));
+  }
+  for(const file of loaded){
+    const lower=file.content.toLowerCase();
+    file.relevance=terms.reduce((score,term)=>score+(lower.includes(term)?(term.includes(" ")?1000:100):0),rank(file.path));
+  }
+  loaded.sort((a,b)=>b.relevance-a.relevance);
+  const selected=loaded.slice(0,MAX_AI_FILES),files=[];
+  let remaining=MAX_CONTEXT_CHARS;
+  for(let i=0;i<selected.length;i++){
+    const file=selected[i],budget=remaining-(selected.length-i-1)*3000;
+    const excerpt=relevantExcerpt(file.content,searchText,budget);
+    files.push({...file,excerpt});remaining-=excerpt.length;
+  }
+  return {branch,headSha,files,requestBody:searchText};
 }
 function aiText(result){return String(result?.response||result?.result?.response||result?.choices?.[0]?.message?.content||"");}
 function parseAiJson(text){const cleaned=String(text||"").trim().replace(/^```(?:json)?\s*/i,"").replace(/\s*```$/,"");const start=cleaned.indexOf("{"),end=cleaned.lastIndexOf("}");if(start<0||end<=start)throw publicError("The AI did not return a usable proposed change. Please add more detail and try again.",502);try{return JSON.parse(cleaned.slice(start,end+1));}catch{throw publicError("The AI proposal could not be read. Please try preparing it again.",502);}}
@@ -336,8 +401,9 @@ function applyAiProposal(proposal,repo){
   const files=[];
   for(const item of grouped){
     const path=String(item.path||""),original=known.get(path);
-    if(!original||!validSourcePath(path))return{error:"The response selected a file that is not available or permitted: "+path};
-    let changed=typeof item.content==="string"?item.content:original.content;
+    if(!original||!permittedProposalPath(path,repo.requestBody))return{error:"The response selected a file that is not available or relevant to this request: "+path};
+    if(typeof item.content==="string"||!Array.isArray(item.edits))return{error:"Use exact source edits only, not whole-file replacement."};
+    let changed=original.content;
     if(Array.isArray(item.edits)){
       if(!item.edits.length||item.edits.length>8)return{error:"The response contained an invalid number of edits for "+path+"."};
       for(const edit of item.edits){
@@ -349,14 +415,46 @@ function applyAiProposal(proposal,repo){
         changed=changed.slice(0,first)+replace+changed.slice(first+find.length);
       }
     }
-    if(!changed||changed===original.content||changed.length>250000)return{error:"The proposed content for "+path+" was empty, unchanged, or too large."};
+    if(!changed||changed===original.content||new TextEncoder().encode(changed).length>MAX_SOURCE_BYTES)return{error:"The proposed content for "+path+" was empty, unchanged, or too large."};
+    const terms=sourceTerms(repo.requestBody);
+    if(terms.length&&!item.edits.some(edit=>terms.some(term=>String(edit.find).toLowerCase().includes(term))))return{error:"The proposed edit does not touch the requested wording or feature in "+path+". Do not substitute an unrelated change."};
     files.push({path,content:changed,sha:original.sha});
   }
   return{files};
 }
 
+function escapeRegex(value){return String(value).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}
+
+function removeWordProposal(issueBody,repo){
+  // An exact label plus a word to remove can be applied without asking the AI
+  // to guess. Restrict matches to complete visible text or quoted strings.
+  const request=requestedChange(issueBody);
+  const match=request.match(/^from\s+["“']([^"”'\n]+)["”']\s*[-,:]?\s*remove\s+(?:the\s+word\s+)?["“']([^"”'\n]+)["”']\s*[.!]?$/i);
+  if(!match)return null;
+  const [,label,word]=match;
+  if(!/^[a-z0-9]+$/i.test(word))return null;
+  const matches=[];
+  for(const file of repo.files.filter(file=>permittedProposalPath(file.path,issueBody))){
+    const pattern=new RegExp('([>"\'`])([ \\t]*)('+escapeRegex(label)+')([ \\t]*)([<"\'`])','gi');
+    for(const found of file.content.matchAll(pattern)){
+      if(found[1]==='>'?found[5]!=='<':found[1]!==found[5])continue;
+      const replacement=found[3].replace(new RegExp('\\b'+escapeRegex(word)+'\\b','gi'),'').replace(/[ \t]{2,}/g,' ').trim();
+      if(replacement!==found[3])matches.push({file,start:found.index+found[1].length+found[2].length,label:found[3],replacement});
+    }
+  }
+  if(!matches.length||matches.length>5||new Set(matches.map(match=>match.file.path)).size!==1){
+    throw publicError("The exact label could not be matched safely in the application code. Check the current wording and try again.",422);
+  }
+  const file=matches[0].file;
+  let content=file.content;
+  for(const match of matches.sort((a,b)=>b.start-a.start))content=content.slice(0,match.start)+match.replacement+content.slice(match.start+match.label.length);
+  return{repo,summary:'Change "'+matches[0].label+'" to "'+matches[0].replacement+'"',files:[{path:file.path,sha:file.sha,content}]};
+}
+
 function simpleWordingProposal(issueBody,repo){
   const body=String(issueBody||"");
+  const removal=removeWordProposal(body,repo);
+  if(removal)return removal;
   if(!/- Change type:\s*Wording or label/i.test(body))return null;
   let current=body.match(/- Exact field or wording:\s*([^\n]+)/i)?.[1]?.trim();
   const request=body.match(/## Requested change\s*\n([\s\S]*?)(?:\n\n## Request details|$)/i)?.[1]?.trim()||"";
@@ -389,11 +487,12 @@ function simpleWordingProposal(issueBody,repo){
 }
 
 async function createProposal(env,bot,issue,extraInstructions=""){
-  if(!env.AI)throw publicError("Cloudflare Workers AI is not connected.",503);
-  const repo=await repositoryContext(env,bot,issue.body);
+  const requestBody=issue.body+(extraInstructions?"\n\n## Revision requested\n"+extraInstructions:"");
+  const repo=await repositoryContext(env,bot,requestBody);
   if(!repo.files.length)throw publicError("No suitable source files were found in this repository.",422);
-  const direct=simpleWordingProposal(issue.body,repo);
+  const direct=/## Revision requested/i.test(requestBody)?null:simpleWordingProposal(issue.body,repo);
   if(direct)return direct;
+  if(!env.AI)throw publicError("Cloudflare Workers AI is not connected.",503);
   const sources=repo.files.map(file=>"\n--- FILE: "+file.path+" ---\n"+(file.excerpt||file.content)).join("");
   const requestDetails=requestForAi(issue.body);
   const prompt=[
@@ -402,6 +501,7 @@ async function createProposal(env,bot,issue,extraInstructions=""){
     "Find the closest matching existing interface label or behaviour in the supplied source. The find value must always be copied exactly from the source, never copied blindly from the user's wording.",
     "Return ONLY strict JSON with this shape: {\"summary\":\"short summary\",\"files\":[{\"path\":\"existing/path\",\"edits\":[{\"find\":\"exact existing text\",\"replace\":\"replacement text\"}]}]}",
     "Rules: modify only existing files shown below; return no more than 3 files and 8 edits per file; every find value must be an exact, unique substring copied from the source; use an empty replace value to remove text; never modify .github/workflows; never delete or rename files; make the smallest change that satisfies the request; preserve existing behaviour and secrets; do not invent credentials.",
+    "Screen and behaviour changes must update the actual application source. Never change a README, project name, or unrelated text as a substitute. If the requested feature cannot be found, return {\"error\":\"Requested feature not found in supplied source\"} rather than guessing. Return edits only, never a complete file.",
     "Complete request details:\n"+requestDetails,
     extraInstructions?"Revision instructions:\n"+extraInstructions:"",
     "Repository files:"+sources
