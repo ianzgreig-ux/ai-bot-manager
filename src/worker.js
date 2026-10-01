@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.6";
+const APP_VERSION = "2026.10.01.7";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -159,7 +159,7 @@ async function createChangeRequest(request, env) {
     "",
     storedScreenshots.length ? "<!-- bot-manager-request-id:" + requestId + ";r2-keys:" + storedScreenshots.map(item => item.key).join("|") + " -->" : "",
     "",
-    "> This request has not been deployed. It requires review, implementation and testing."
+    "> This request has not been deployed. The submitting user will review the proposed change before approving deployment."
   ].join("\n");
 
   const response = await fetch("https://api.github.com/repos/" + bot.repository + "/issues", {
@@ -314,7 +314,7 @@ function renderBots(bots){const host=$('bots');host.replaceChildren();for(const 
 function selectBot(bot,card){selectedBot=bot;document.querySelectorAll('.bot').forEach(x=>x.classList.remove('selected'));card.classList.add('selected');$('requestTitle').textContent='Request a change to '+bot.name;$('requestPanel').classList.add('active');$('requestResult').style.display='none';status($('requestStatus'),'');$('requestText').focus()}
 $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;status($('loginStatus'),'Checking access...');try{const session=await api('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,pin:$('pin').value})});$('pin').value='';status($('loginStatus'),'');await showApp(session)}catch(error){status($('loginStatus'),error.message,true)}finally{button.disabled=false}});
 $('logout').addEventListener('click',async()=>{await api('/api/logout',{method:'POST'});selectedBot=null;$('requestPanel').classList.remove('active');showLogin()});
-$('requestForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedBot)return;const button=$('submitRequest');button.disabled=true;status($('requestStatus'),'Submitting change request...');$('requestResult').style.display='none';try{const formData=new FormData();formData.append('botId',selectedBot.id);formData.append('request',$('requestText').value);for(const file of $('screenshots').files)formData.append('screenshots',file);const data=await api('/api/change-requests',{method:'POST',body:formData});status($('requestStatus'),'Request created.','');$('requestResult').textContent='Request #'+data.issueNumber+' has been created with '+data.screenshotCount+' screenshot'+(data.screenshotCount===1?'':'s')+' and is awaiting review. No change has been deployed.';$('requestResult').style.display='block';$('requestText').value='';$('screenshots').value='';$('screenshotPreviews').replaceChildren()}catch(error){status($('requestStatus'),error.message,true);if(error.status===401)showLogin()}finally{button.disabled=false}});
+$('requestForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedBot)return;const button=$('submitRequest');button.disabled=true;status($('requestStatus'),'Submitting change request...');$('requestResult').style.display='none';try{const formData=new FormData();formData.append('botId',selectedBot.id);formData.append('request',$('requestText').value);for(const file of $('screenshots').files)formData.append('screenshots',file);const data=await api('/api/change-requests',{method:'POST',body:formData});status($('requestStatus'),'Request created.','');$('requestResult').textContent='Request #'+data.issueNumber+' has been created with '+data.screenshotCount+' screenshot'+(data.screenshotCount===1?'':'s')+' and has been submitted. You will review the proposed change before approving deployment.';$('requestResult').style.display='block';$('requestText').value='';$('screenshots').value='';$('screenshotPreviews').replaceChildren()}catch(error){status($('requestStatus'),error.message,true);if(error.status===401)showLogin()}finally{button.disabled=false}});
 $('screenshots').addEventListener('change',()=>{const host=$('screenshotPreviews');host.replaceChildren();const files=[...$('screenshots').files];if(files.length>5){status($('requestStatus'),'You can attach up to five screenshots.',true);$('screenshots').value='';return}for(const file of files){const img=document.createElement('img');img.alt=file.name;img.src=URL.createObjectURL(file);img.onload=()=>URL.revokeObjectURL(img.src);host.appendChild(img)}});
 initialise();
 </script></body></html>`;
