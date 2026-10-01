@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.18";
+const APP_VERSION = "2026.10.01.19";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
