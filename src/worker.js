@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.2";
+const APP_VERSION = "2026.10.01.3";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -138,12 +138,23 @@ async function createChangeRequest(request, env) {
     },
     body: JSON.stringify({ title: "Change request: " + titleText, body: issueBody, labels: ["bot-change-request"] })
   });
-  const result = await response.json();
+  const responseText = await response.text();
+  let result;
+  try {
+    result = JSON.parse(responseText);
+  } catch {
+    console.error("GitHub returned non-JSON", response.status, responseText.slice(0, 300));
+    throw publicError("GitHub returned an unexpected response. Check the GitHub token and repository access.", 502);
+  }
   if (!response.ok) {
     console.error("GitHub issue error", response.status, result);
     throw publicError(response.status === 404
       ? "The GitHub connection cannot access this repository or its Issues feature."
-      : "GitHub could not create the change request.", 502);
+      : response.status === 401
+        ? "The GitHub token is invalid or has expired."
+        : response.status === 403
+          ? "The GitHub token does not have permission to create Issues in this repository."
+          : "GitHub could not create the change request.", 502);
   }
   return json({ ok: true, issueNumber: result.number, issueUrl: result.html_url, title: result.title });
 }
@@ -258,7 +269,7 @@ const HTML = `<!doctype html>
 <section id="requestPanel" class="card requestPanel"><div class="requestHeader"><div><h2 id="requestTitle">Request a change</h2><p id="requestRepo" class="help"></p></div><span class="badge">Creates a GitHub request</span></div><form id="requestForm"><div class="field"><label for="requestText">What would you like changed?</label><textarea id="requestText" maxlength="6000" placeholder="Describe what should change, why it is needed, and an example of the expected result." required></textarea></div><button id="submitRequest" class="button" type="submit">Submit change request</button><div id="requestStatus" class="status" role="status"></div><div id="requestResult" class="result"></div></form></section>
 </section></main><script>
 let selectedBot=null;const $=id=>document.getElementById(id);
-async function api(path,options={}){const response=await fetch(path,{cache:'no-store',credentials:'same-origin',...options});const data=await response.json();if(!response.ok){const e=new Error(data.error||'Unable to complete the request.');e.status=response.status;throw e}return data}
+async function api(path,options={}){const response=await fetch(path,{cache:'no-store',credentials:'same-origin',...options});const body=await response.text();let data;try{data=JSON.parse(body)}catch{const e=new Error('The server returned an unexpected response (HTTP '+response.status+'). Check the Cloudflare logs.');e.status=response.status;throw e}if(!response.ok){const e=new Error(data.error||'Unable to complete the request.');e.status=response.status;throw e}return data}
 function status(el,message,error=false){el.textContent=message;el.className='status '+(error?'error':'')}
 async function initialise(){try{const session=await api('/api/session');if(session.authenticated)await showApp(session);else showLogin()}catch{showLogin()}}
 function showLogin(){$('loginCard').classList.remove('hidden');$('app').classList.add('hidden')}
