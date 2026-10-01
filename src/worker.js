@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.24";
+const APP_VERSION = "2026.10.01.25";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -358,9 +358,12 @@ function applyAiProposal(proposal,repo){
 function simpleWordingProposal(issueBody,repo){
   const body=String(issueBody||"");
   if(!/- Change type:\s*Wording or label/i.test(body))return null;
-  const current=body.match(/- Exact field or wording:\s*([^\n]+)/i)?.[1]?.trim();
-  if(!current||/^not specified$/i.test(current))return null;
+  let current=body.match(/- Exact field or wording:\s*([^\n]+)/i)?.[1]?.trim();
   const request=body.match(/## Requested change\s*\n([\s\S]*?)(?:\n\n## Request details|$)/i)?.[1]?.trim()||"";
+  if(!current||/^not specified$/i.test(current)){
+    current=request.match(/\bfrom\s+(.+?)(?:[.]\s*new\s+(?:word|wording|text|label)\b|$)/i)?.[1]?.trim();
+  }
+  if(!current)return null;
   const replacement=
     request.match(/new (?:word|wording|text|label)\s*(?:is|should be|:)?\s*["“']([^"”']+)["”']/i)?.[1]?.trim()||
     request.match(/(?:change|replace)\s+["“']?[^\n"”']+["”']?\s+(?:to|with)\s+["“']([^"”']+)["”']/i)?.[1]?.trim();
