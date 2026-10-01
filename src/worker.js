@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.10.01.23";
+const APP_VERSION = "2026.10.01.24";
 const SESSION_COOKIE = "__Host-ai_bot_manager";
 const SESSION_SECONDS = 12 * 60 * 60;
 const attempts = new Map();
@@ -370,10 +370,11 @@ function simpleWordingProposal(issueBody,repo){
     let position=0;
     while((position=file.content.indexOf(current,position))>=0){matches.push({file,position});position+=current.length;}
   }
-  if(matches.length!==1)return null;
-  const match=matches[0];
-  const changed=match.file.content.slice(0,match.position)+replacement+match.file.content.slice(match.position+current.length);
-  return{repo,summary:"Change "+current+" to "+replacement,files:[{path:match.file.path,content:changed,sha:match.file.sha}]};
+  const paths=[...new Set(matches.map(match=>match.file.path))];
+  if(!matches.length||matches.length>5||paths.length!==1)return null;
+  const file=matches[0].file;
+  const changed=file.content.split(current).join(replacement);
+  return{repo,summary:"Change "+current+" to "+replacement+" in "+matches.length+" matching interface location"+(matches.length===1?"":"s"),files:[{path:file.path,content:changed,sha:file.sha}]};
 }
 
 async function createProposal(env,bot,issue,extraInstructions=""){
