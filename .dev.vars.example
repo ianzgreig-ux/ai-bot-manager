@@ -1,0 +1,5 @@
+SUPER_ADMIN_PIN="replace-with-six-digits"
+RUN_HAVEN_ADMIN_PIN="replace-with-six-digits"
+CONFIDENCE_ADMIN_PIN="replace-with-six-digits"
+SESSION_SECRET="replace-with-a-long-random-secret"
+GITHUB_TOKEN="optional-github-token"
